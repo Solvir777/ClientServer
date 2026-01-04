@@ -1,168 +1,94 @@
-mod client_thread;
-
-use bimap::BiMap;
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash};
+mod client_handler;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use serializeable::Serializeable;
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, ToSocketAddrs, UdpSocket};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use common::{ClientMessage, ClientTcpMessage, ClientUdpMessage, ServerMessage};
-use tokio::sync::mpsc::{UnboundedReceiver as Receiver, UnboundedSender as Sender};
-use crate::server::UserId;
+use common::message::{ClientMessage, ClientUdpMessage, ServerMessage};
+use tokio::sync::mpsc::{UnboundedReceiver as Receiver,UnboundedSender as Sender, UnboundedSender};
+use common::UserId;
+use crate::server_network_manager::client_handler::ClientHandler;
 
 pub(crate) struct ServerNetworkManager{
-    addr_to_user_id: Arc<Mutex<BiMap<SocketAddr, UserId>>>,
-    user_id_to_tcp_writer: Arc<Mutex<HashMap<UserId, OwnedWriteHalf>>>,
+    socket_addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>,
+    user_id_to_message_sender: Arc<RwLock<HashMap<UserId, UnboundedSender<ServerMessage>>>>,
 
-    listener: TcpListener,
-    udp: Arc<UdpSocket>,
+    tcp_listener: TcpListener,
+    udp_socket: Arc<UdpSocket>,
 
-    incoming_messages: Sender<(ClientMessage, UserId)>,
-    outgoing_messages: Receiver<(ServerMessage, UserId)>
+    outgoing_messages: Receiver<(ServerMessage, UserId)>,
+    incoming_messages: Sender<(ClientMessage, UserId)>
 }
 
 
 impl ServerNetworkManager {
-    async fn new<A: ToSocketAddrs>(
-        addr: A,
-        messages_outgoing: Receiver<(ServerMessage, UserId)>,
-        messages_incoming: Sender<(ClientMessage, UserId)>,
-    ) -> Self{
-        let listener = TcpListener::bind(&addr).await.unwrap();
-        let udp = UdpSocket::bind(addr).await.unwrap();
-        println!("Server listening on: {}", udp.local_addr().unwrap());
 
-        Self{
-            addr_to_user_id: Default::default(),
-            user_id_to_tcp_writer: Default::default(),
-            listener,
-            udp: Arc::new(udp),
-            incoming_messages: messages_incoming,
-            outgoing_messages: messages_outgoing,
-        }
-    }
-
-    ///Calling this creates a new Thread that will receive and send messages to Clients, based on their UserId.
-
-    pub fn run<A: ToSocketAddrs>(
+    pub async fn new<A: ToSocketAddrs>(
         addr: A,
         outgoing_messages: Receiver<(ServerMessage, UserId)>,
         incoming_messages: Sender<(ClientMessage, UserId)>
-    ){
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .build().unwrap();
+    ) -> Self{
+        let tcp_listener = TcpListener::bind(&addr).await.unwrap();
+        let udp = UdpSocket::bind(addr).await.unwrap();
 
-        let this = rt.block_on(
-            Self::new(&addr, outgoing_messages, incoming_messages)
-        );
-
-        let a = rt.spawn(Self::accept_clients(this.listener, this.incoming_messages.clone(), this.addr_to_user_id.clone(), this.user_id_to_tcp_writer.clone()));
-        let b = rt.spawn(Self::receive_messages_udp(this.udp.clone(), this.incoming_messages, this.addr_to_user_id.clone()));
-        let c = rt.spawn(Self::send_messages(this.outgoing_messages, this.addr_to_user_id.clone(), this.user_id_to_tcp_writer.clone(), this.udp.clone()));
-        let _ = std::thread::spawn(
-            move || {
-                rt.block_on(
-                    async {
-                        tokio::join!(a, b, c);
-                        println!("Server exiting");
-                    }
-                );
-            }
-        );
+        Self{
+            socket_addr_to_user_id: Default::default(),
+            user_id_to_message_sender: Default::default(),
+            tcp_listener,
+            udp_socket: Arc::new(udp),
+            incoming_messages,
+            outgoing_messages,
+        }
     }
 
-
-    /// Sends out messages received over the messages_outgoing Channel
-    async fn send_messages(
-        mut messages_outgoing: Receiver<(ServerMessage, UserId)>,
-        addr_to_user_id: Arc<Mutex<BiMap<SocketAddr, UserId>>>,
-        user_id_to_tcp_writer: Arc<Mutex<HashMap<UserId, OwnedWriteHalf>>>,
-        udp: Arc<UdpSocket>,
-    ) { loop {
-        if let Some((message, user_id)) = messages_outgoing.recv().await {
-            match message {
-                ServerMessage::ServerTcpMessage(msg) => {
-                    if let Some(writer) = user_id_to_tcp_writer.lock().await.get_mut(&user_id) {
-                        let bytes = msg.serialize();
-                        writer.write_all(&bytes).await.unwrap();
-                    }
-                    else{
-                        println!("UserId {user_id} not recognized. Following message was not sent: {:?}", msg);
-                    }
-                }
-                ServerMessage::ServerUdpMessage(msg) => {
-                    if let Some(addr) = addr_to_user_id.lock().await.get_by_right(&user_id) {
-                        udp.send_to(&msg.serialize(), addr).await.unwrap();
-                    }
-                    else {
-                        println!("couldnt send to user via udp");
-                    }
-                }
+    ///Call this to start accepting clients
+    pub fn run(self){
+        tokio::spawn(Self::accept_clients(self.tcp_listener, self.incoming_messages.clone(), self.udp_socket.clone(), self.user_id_to_message_sender.clone(), self.socket_addr_to_user_id.clone()));
+        tokio::spawn(Self::receive_messages_udp(self.udp_socket.clone(), self.incoming_messages.clone(), self.socket_addr_to_user_id.clone()));
+        tokio::spawn(Self::distribute_messages(self.user_id_to_message_sender, self.outgoing_messages));
+    }
+    
+    
+    /// Distributes messages to their respective client thread to be send. \
+    /// This will not return
+    async fn distribute_messages(user_id_to_message_sender: Arc<RwLock<HashMap<UserId, UnboundedSender<ServerMessage>>>>, mut outgoing_messages: Receiver<(ServerMessage, UserId)>) {
+        while let Some((message, user_id)) = outgoing_messages.recv().await {
+            if let Some(sender) = user_id_to_message_sender.read().await.get(&user_id) {
+                sender.send(message).unwrap();
             }
-        } else { break; }
-    } }
-
-
-    ///Open a TcpListener and spawn a message receiver for every incoming connection
+        }
+    }
+    
+    /// Open a TcpListener and spawn a client handler for every incoming connection. \
+    /// This will not return
     async fn accept_clients(
         listener: TcpListener,
         incoming_messages: Sender<(ClientMessage, UserId)>,
-        addr_to_user_id: Arc<Mutex<BiMap<SocketAddr, UserId>>>,
-        user_id_to_tcp_writer: Arc<Mutex<HashMap<UserId, OwnedWriteHalf>>>,
-    ) { loop {
-        let (client, addr) = listener.accept().await.unwrap();
-        let id = hash_addr(&addr);
-        addr_to_user_id.lock().await.insert(addr, id);
-        let (reader, writer) = client.into_split();
-        user_id_to_tcp_writer.lock().await.insert(id, writer);
+        udp: Arc<UdpSocket>,
+        message_senders: Arc<RwLock<HashMap<UserId, UnboundedSender<ServerMessage>>>>,
+        addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>,
+    ) {
+        let connected_ids: Arc<Mutex<HashSet<UserId>>> = Default::default();
+        loop { 
+            let client_stream= listener.accept().await.unwrap().0;
+            
+            ClientHandler::spawn(udp.clone(), client_stream, incoming_messages.clone(), message_senders.clone(), addr_to_user_id.clone(), connected_ids.clone());
+        } 
+    }
 
-        println!("using id {} for new client", id);
-
-        tokio::spawn(Self::receive_messages_tcp(reader, incoming_messages.clone(), id));
-    } }
-
-    ///Spawn once to receive messages over udp
-    async fn receive_messages_udp(udp: Arc<UdpSocket>, incoming_messages: Sender<(ClientMessage, UserId)>, addr_to_user_id: Arc<Mutex<BiMap<SocketAddr, UserId>>>) {
+    /// Spawn once to receive messages over udp. \
+    /// This will not return
+    async fn receive_messages_udp(udp: Arc<UdpSocket>, incoming_messages: Sender<(ClientMessage, UserId)>, addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>) {
         let mut buf = [0u8; 2048];
         loop {
             let (n, sender) = udp.recv_from(&mut buf).await.unwrap();
             let msg = ClientUdpMessage::deserialize(&mut &buf[..n]).unwrap();
-            println!("socket_addr: {sender}, list: {:?}", addr_to_user_id.lock().await);
+            println!("socket_addr: {sender}, list: {:?}", addr_to_user_id.read().await);
 
-            if let Some(id) = addr_to_user_id.lock().await.get_by_left(&sender) {
-                incoming_messages.send((ClientMessage::ClientUdpMessage(msg), *id)).unwrap();
+            if let Some(id) = addr_to_user_id.read().await.get(&sender) {
+                incoming_messages.send((ClientMessage::Udp(msg), *id)).unwrap();
             } else{ println!("Received message from unknown client. msg: {:?}", msg); }
         }
     }
-    ///Spawn per Client
-    async fn receive_messages_tcp(mut tcp: OwnedReadHalf, incoming_messages: Sender<(ClientMessage, UserId)>, id: u64) {
-        loop{
-            let res = ClientTcpMessage::async_deserialize(&mut tcp).await;
-            match res {
-                Ok(msg) => {
-                    incoming_messages.send((ClientMessage::ClientTcpMessage(msg), id)).unwrap();
-                }
-                Err(err) => {
-                    println!("client disconnected with error {err}!");
-                    //client disconnected:
-                    // todo: remove client from maps
-                    break;
-                }
-            }
-        }
-    }
-}
-
-
-fn hash_addr(addr: &SocketAddr) -> u64 {
-    use std::hash::DefaultHasher;
-    use std::hash::{Hasher, Hash};
-    let mut hasher = DefaultHasher::new();
-    addr.hash(&mut hasher);
-    hasher.finish()
 }
