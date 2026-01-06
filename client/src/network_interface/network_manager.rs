@@ -5,7 +5,7 @@ use tokio::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver as Receiver, UnboundedReceiver, UnboundedSender as Sender, UnboundedSender};
 use common::message::{ClientMessage, ServerMessage, ServerTcpMessage, ServerUdpMessage};
-pub struct ClientNetworkManager {
+pub struct NetworkManager {
     tcp: TcpStream,
     udp: Arc<UdpSocket>,
 
@@ -13,8 +13,8 @@ pub struct ClientNetworkManager {
     outgoing_messages: Receiver<ClientMessage>,
 }
 
-impl ClientNetworkManager {
-    pub async fn new<A: ToSocketAddrs>(server_addr: A) -> std::io::Result<(UnboundedSender<ClientMessage>, UnboundedReceiver<ServerMessage>)> {
+impl NetworkManager {
+    pub async fn launch<A: ToSocketAddrs>(server_addr: A) -> std::io::Result<(UnboundedSender<ClientMessage>, UnboundedReceiver<ServerMessage>)> {
         let (outgoing_messages_sender, outgoing_messages_receiver) = unbounded_channel();
         let (incoming_messages_sender, incoming_messages_receiver) = unbounded_channel();
 

@@ -1,33 +1,24 @@
 use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{unbounded_channel as channel, UnboundedReceiver as Receiver, UnboundedSender as Sender};
 use tokio::net::ToSocketAddrs;
-use common::message::{ClientMessage, ServerMessage};
 use common::UserId;
-use crate::server_network_manager::ServerNetworkManager;
-
+use crate::network_interface::NetworkInterface;
 
 pub(crate) struct Server {
+    network_interface: NetworkInterface,
     state: ServerState,
-    pub(super) incoming_messages: Receiver<(ClientMessage, UserId)>,
-    outgoing_messages: Sender<(ServerMessage, UserId)>,
     last_tick: Instant,
 }
 
 impl Server {
     const TICK_INTERVAL: Duration = Duration::from_millis(10);
     pub(crate) async fn new<A: ToSocketAddrs>(addr: A) -> Self {
-        let (in_tx, in_rx) = channel();
-        let (out_tx, out_rx) = channel();
-
-        ServerNetworkManager::new(addr, out_rx, in_tx).await
-            .run();
+        let network_interface = NetworkInterface::create(addr);
 
         Self{
             state: Default::default(),
-            incoming_messages: in_rx,
-            outgoing_messages: out_tx,
+            network_interface,
             last_tick: Instant::now(),
         }
     }
@@ -47,8 +38,6 @@ impl Server {
         }
         self.last_tick = Instant::now();
     }
-
-
 }
 
 struct Client {

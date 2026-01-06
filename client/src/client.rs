@@ -1,19 +1,16 @@
 use tokio::net::ToSocketAddrs;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use common::message::{ClientMessage, ServerMessage};
-use crate::client_network_manager::ClientNetworkManager;
+use crate::network_interface::NetworkInterface;
 
 pub(super) struct Client{
-    pub(crate) incoming_messages: UnboundedReceiver<ServerMessage>,
-    outgoing_messages: UnboundedSender<ClientMessage>,
+    pub network_interface: NetworkInterface,
 }
 
 impl Client {
     /// Creates a new Client Instance and connects to the provided Address
     pub async fn new<A: ToSocketAddrs>(server_address: A) -> std::io::Result<Self> {
-        let (outgoing_messages, incoming_messages) = ClientNetworkManager::new(server_address).await?;
+        let interface = NetworkInterface::create(server_address).await?;
         Ok(Self{
-            incoming_messages, outgoing_messages,
+            network_interface: interface
         })
     }
 

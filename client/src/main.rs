@@ -1,6 +1,6 @@
-mod client_network_manager;
 mod client;
 mod message_resolver;
+mod network_interface;
 
 use common::SERVER_ADDR;
 use crate::client::Client;

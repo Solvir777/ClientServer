@@ -6,11 +6,12 @@ use tokio::sync::{Mutex, RwLock};
 use serializeable::Serializeable;
 use tokio::net::{TcpListener, ToSocketAddrs, UdpSocket};
 use common::message::{ClientMessage, ClientUdpMessage, ServerMessage};
-use tokio::sync::mpsc::{UnboundedReceiver as Receiver,UnboundedSender as Sender, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver as Receiver, UnboundedSender as Sender, UnboundedSender};
 use common::UserId;
-use crate::server_network_manager::client_handler::ClientHandler;
+use crate::network_interface::ClientEvent;
+use crate::network_interface::network_manager::client_handler::ClientHandler;
 
-pub(crate) struct ServerNetworkManager{
+pub(super) struct NetworkManager {
     socket_addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>,
     user_id_to_message_sender: Arc<RwLock<HashMap<UserId, UnboundedSender<ServerMessage>>>>,
 
@@ -18,32 +19,34 @@ pub(crate) struct ServerNetworkManager{
     udp_socket: Arc<UdpSocket>,
 
     outgoing_messages: Receiver<(ServerMessage, UserId)>,
-    incoming_messages: Sender<(ClientMessage, UserId)>
+    incoming_messages: Sender<(ClientEvent, UserId)>
 }
 
 
-impl ServerNetworkManager {
+impl NetworkManager {
 
-    pub async fn new<A: ToSocketAddrs>(
+    pub(super) async fn launch<A: ToSocketAddrs>(
         addr: A,
-        outgoing_messages: Receiver<(ServerMessage, UserId)>,
-        incoming_messages: Sender<(ClientMessage, UserId)>
-    ) -> Self{
+    ) -> (Sender<(ServerMessage, UserId)>, Receiver<(ClientEvent, UserId)>){
         let tcp_listener = TcpListener::bind(&addr).await.unwrap();
         let udp = UdpSocket::bind(addr).await.unwrap();
-
+        let (in_tx, in_rx) = unbounded_channel();
+        let (out_tx, out_rx) = unbounded_channel();
+        
         Self{
             socket_addr_to_user_id: Default::default(),
             user_id_to_message_sender: Default::default(),
             tcp_listener,
             udp_socket: Arc::new(udp),
-            incoming_messages,
-            outgoing_messages,
-        }
+            incoming_messages: in_tx,
+            outgoing_messages: out_rx,
+        }.run();
+        
+        (out_tx, in_rx)
     }
 
     ///Call this to start accepting clients
-    pub fn run(self){
+    pub(super) fn run(self){
         tokio::spawn(Self::accept_clients(self.tcp_listener, self.incoming_messages.clone(), self.udp_socket.clone(), self.user_id_to_message_sender.clone(), self.socket_addr_to_user_id.clone()));
         tokio::spawn(Self::receive_messages_udp(self.udp_socket.clone(), self.incoming_messages.clone(), self.socket_addr_to_user_id.clone()));
         tokio::spawn(Self::distribute_messages(self.user_id_to_message_sender, self.outgoing_messages));
@@ -64,7 +67,7 @@ impl ServerNetworkManager {
     /// This will not return
     async fn accept_clients(
         listener: TcpListener,
-        incoming_messages: Sender<(ClientMessage, UserId)>,
+        incoming_messages: Sender<(ClientEvent, UserId)>,
         udp: Arc<UdpSocket>,
         message_senders: Arc<RwLock<HashMap<UserId, UnboundedSender<ServerMessage>>>>,
         addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>,
@@ -79,7 +82,7 @@ impl ServerNetworkManager {
 
     /// Spawn once to receive messages over udp. \
     /// This will not return
-    async fn receive_messages_udp(udp: Arc<UdpSocket>, incoming_messages: Sender<(ClientMessage, UserId)>, addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>) {
+    async fn receive_messages_udp(udp: Arc<UdpSocket>, incoming_messages: Sender<(ClientEvent, UserId)>, addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>) {
         let mut buf = [0u8; 2048];
         loop {
             let (n, sender) = udp.recv_from(&mut buf).await.unwrap();
@@ -87,7 +90,7 @@ impl ServerNetworkManager {
             println!("socket_addr: {sender}, list: {:?}", addr_to_user_id.read().await);
 
             if let Some(id) = addr_to_user_id.read().await.get(&sender) {
-                incoming_messages.send((ClientMessage::Udp(msg), *id)).unwrap();
+                incoming_messages.send((ClientEvent::ClientMessage(ClientMessage::Udp(msg)), *id)).unwrap();
             } else{ println!("Received message from unknown client. msg: {:?}", msg); }
         }
     }

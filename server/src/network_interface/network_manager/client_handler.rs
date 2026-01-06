@@ -14,13 +14,14 @@ use tokio::sync::mpsc::{UnboundedReceiver as Receiver, UnboundedSender as Sender
 use tokio::sync::{Mutex, RwLock};
 use common::message::client_message::ClientConnectionMessage;
 use common::message::server_message::ServerConnectionMessage;
+use crate::network_interface::ClientEvent;
 
 pub struct ClientHandler {
     id: UserId,
     udp: Arc<UdpSocket>,
     tcp_writer: OwnedWriteHalf,
     tcp_reader: OwnedReadHalf,
-    incoming_messages: Sender<(ClientMessage, UserId)>, //Only for TCP.
+    incoming_messages: Sender<(ClientEvent, UserId)>, //Only for TCP.
     outgoing_messages: Receiver<ServerMessage>,
 }
 
@@ -50,9 +51,8 @@ impl ClientHandler {
                     if connected_ids.lock().await.insert(requested_id) {
                         ServerConnectionMessage::AcknowledgeId.send(tcp).await.unwrap();
                         return requested_id;
-                    } else {
-                        ServerConnectionMessage::IdAlreadyInUse.send(tcp).await.unwrap();
-                        //let the client start a new connection attempt
+                    } else { //let the client start a new connection attempt
+                        ServerConnectionMessage::IdAlreadyInUse.send(tcp).await.unwrap(); 
                     }
                 },
             }
@@ -61,7 +61,7 @@ impl ClientHandler {
     pub fn spawn(
         udp: Arc<UdpSocket>,
         mut tcp: TcpStream,
-        incoming_messages: UnboundedSender<(ClientMessage, UserId)>,
+        incoming_messages: UnboundedSender<(ClientEvent, UserId)>,
         outgoing_message_writers: Arc<RwLock<HashMap<UserId, UnboundedSender<ServerMessage>>>>,
         addr_to_user_id: Arc<RwLock<HashMap<SocketAddr, UserId>>>,
         connected_users: Arc<Mutex<HashSet<UserId>>>,
@@ -70,14 +70,13 @@ impl ClientHandler {
             async move {
                 {
                     let id = ClientHandler::login_procedure(&mut tcp, connected_users.clone()).await;
+                    incoming_messages.send((ClientEvent::Connected, id)).unwrap();
+                    addr_to_user_id.write().await.insert(tcp.peer_addr().unwrap(), id);
 
-                    let (tcp_reader, tcp_writer) = tcp.into_split();
                     let (outgoing_per_client_tx, outgoing_per_client_rx) = unbounded_channel::<ServerMessage>();
-
-
-                    addr_to_user_id.write().await.insert(tcp_reader.peer_addr().unwrap(), id);
                     outgoing_message_writers.write().await.insert(id, outgoing_per_client_tx);
 
+                    let (tcp_reader, tcp_writer) = tcp.into_split();
                     Self {
                         id,
                         udp,
@@ -87,7 +86,7 @@ impl ClientHandler {
                         outgoing_messages: outgoing_per_client_rx,
                     }
                 }
-                    .run() 
+                    .run().await
             }
         );
     }
@@ -99,18 +98,20 @@ impl ClientHandler {
         tokio::spawn(Self::receive_tcp(self.tcp_reader, self.incoming_messages, self.id));
         tokio::spawn(Self::send_udp(udp_message_receiver, self.udp, self.tcp_writer.peer_addr().unwrap()));
         tokio::spawn(Self::send_tcp(tcp_message_receiver, self.tcp_writer));
-        while let Some(msg) = self.outgoing_messages.recv().await {
-            match msg {
-                ServerMessage::Tcp(tcp_msg) => {tcp_message_sender.send(tcp_msg).unwrap();}
-                ServerMessage::Udp(udp_msg) => {udp_message_sender.send(udp_msg).unwrap();}
+        loop {
+            match self.outgoing_messages.recv().await.unwrap() {
+                ServerMessage::Tcp(tcp_msg) => {tcp_message_sender.send(tcp_msg).expect(&format!("Tcp Sender for client {}, crashed", self.id));}
+                ServerMessage::Udp(udp_msg) => {udp_message_sender.send(udp_msg).expect(&format!("Udp Sender for client {}, crashed", self.id));}
             }
         }
+
     }
     
-    async fn receive_tcp(mut tcp_reader: OwnedReadHalf, incoming_messages: Sender<(ClientMessage, UserId)>, id: UserId) {
+    async fn receive_tcp(mut tcp_reader: OwnedReadHalf, incoming_messages: Sender<(ClientEvent, UserId)>, id: UserId) {
         while let Ok(msg) = ClientTcpMessage::async_deserialize(&mut tcp_reader).await {
-            incoming_messages.send((ClientMessage::Tcp(msg), id)).unwrap();
+            incoming_messages.send((ClientEvent::ClientMessage(ClientMessage::Tcp(msg)), id)).unwrap();
         }
+        incoming_messages.send((ClientEvent::Disconnected, id)).unwrap();
     }
     
     async fn send_tcp(mut receiver: Receiver<ServerTcpMessage>, mut tcp_writer: OwnedWriteHalf) {

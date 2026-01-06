@@ -1,15 +1,12 @@
-use tokio::sync::mpsc::error::TryRecvError;
 use common::message::{ServerMessage, ServerTcpMessage, ServerUdpMessage};
 use crate::client::Client;
 
 impl Client {
     pub fn handle_incoming_messages(&mut self) {
-        loop{
-            match self.incoming_messages.try_recv(){
-                Ok(ServerMessage::Tcp(msg)) => self.handle_tcp_message(msg),
-                Ok(ServerMessage::Udp(msg)) => self.handle_udp_message(msg),
-                Err(TryRecvError::Disconnected) => panic!("Network manager shut down unexpectedly"),
-                Err(TryRecvError::Empty) => break,
+        while let Some(message) = self.network_interface.incoming_message() {
+            match message {
+                ServerMessage::Tcp(msg) => self.handle_tcp_message(msg),
+                ServerMessage::Udp(msg) => self.handle_udp_message(msg),
             }
         }
     }
