@@ -1,6 +1,8 @@
 use std::io::Write;
 
 pub mod message;
+pub mod game_state;
+
 pub type UserId = u64;
 
 pub const SERVER_ADDR: &str = "0.0.0.0:25550";

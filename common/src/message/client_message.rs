@@ -1,10 +1,6 @@
+use nalgebra::Vector2;
 use serializeable::Serializeable;
 use crate::UserId;
-
-#[derive(Serializeable, Debug)]
-pub enum ClientTcpMessage {
-    Text(String),
-}
 
 #[derive(Serializeable, Debug)]
 pub enum ClientConnectionMessage{
@@ -12,9 +8,13 @@ pub enum ClientConnectionMessage{
     ConnectWithId(UserId),
 }
 
+#[derive(Serializeable, Debug)]
+pub enum ClientTcpMessage {
+    Respawn,
+}
+
 
 #[derive(Serializeable, Debug)]
 pub enum ClientUdpMessage {
-    ChatMessage(String),
+    Move{new_pos: Vector2<f32>},
 }
-

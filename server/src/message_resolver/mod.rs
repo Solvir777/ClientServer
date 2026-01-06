@@ -27,12 +27,17 @@ impl Server {
     
     fn handle_tcp_message(&mut self, message: ClientTcpMessage, userid: UserId) {
         match message {
+            ClientTcpMessage::Respawn => {
+                println!("player is getting respawned!");
+                self.state.spawn_player(userid);
+            }
             _ => unimplemented!(),
         }
     }
     
     fn handle_udp_message(&mut self, message: ClientUdpMessage, userid: UserId) {
         match message {
+            ClientUdpMessage::Move{new_pos} => {self.state.move_player(userid, new_pos);}
             _ => unimplemented!(),
         }
     }

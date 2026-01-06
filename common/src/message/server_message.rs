@@ -1,12 +1,8 @@
 use serializeable::Serializeable;
+use crate::game_state::GameStateUpdate;
 use crate::UserId;
 
-#[derive(Serializeable, Debug)]
-pub enum ServerTcpMessage {
-    Text(String),
-    AssignUserId(UserId),
-    
-}
+
 /// Used when a client is connecting
 #[derive(Serializeable, Debug)]
 pub enum ServerConnectionMessage{
@@ -18,6 +14,10 @@ pub enum ServerConnectionMessage{
 
 #[derive(Serializeable, Debug)]
 pub enum ServerUdpMessage {
-    ChatMessage(String),
+    GameState(GameStateUpdate)
 }
 
+#[derive(Serializeable, Debug)]
+pub enum ServerTcpMessage {
+    Nothing,
+}

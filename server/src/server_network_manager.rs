@@ -72,6 +72,7 @@ impl ServerNetworkManager {
         let connected_ids: Arc<Mutex<HashSet<UserId>>> = Default::default();
         loop { 
             let client_stream= listener.accept().await.unwrap().0;
+            println!("new connection from: {}", client_stream.peer_addr().unwrap());
             
             ClientHandler::spawn(udp.clone(), client_stream, incoming_messages.clone(), message_senders.clone(), addr_to_user_id.clone(), connected_ids.clone());
         } 
@@ -84,7 +85,6 @@ impl ServerNetworkManager {
         loop {
             let (n, sender) = udp.recv_from(&mut buf).await.unwrap();
             let msg = ClientUdpMessage::deserialize(&mut &buf[..n]).unwrap();
-            println!("socket_addr: {sender}, list: {:?}", addr_to_user_id.read().await);
 
             if let Some(id) = addr_to_user_id.read().await.get(&sender) {
                 incoming_messages.send((ClientMessage::Udp(msg), *id)).unwrap();

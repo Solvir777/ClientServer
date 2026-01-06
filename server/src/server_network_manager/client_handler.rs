@@ -69,8 +69,9 @@ impl ClientHandler {
         tokio::spawn(
             async move {
                 {
+                    println!("clienthandler spawned");
                     let id = ClientHandler::login_procedure(&mut tcp, connected_users.clone()).await;
-
+                    println!("assigned id: {} to {}", id, tcp.peer_addr().unwrap());
                     let (tcp_reader, tcp_writer) = tcp.into_split();
                     let (outgoing_per_client_tx, outgoing_per_client_rx) = unbounded_channel::<ServerMessage>();
 
@@ -87,7 +88,7 @@ impl ClientHandler {
                         outgoing_messages: outgoing_per_client_rx,
                     }
                 }
-                    .run() 
+                    .run().await
             }
         );
     }
@@ -99,6 +100,7 @@ impl ClientHandler {
         tokio::spawn(Self::receive_tcp(self.tcp_reader, self.incoming_messages, self.id));
         tokio::spawn(Self::send_udp(udp_message_receiver, self.udp, self.tcp_writer.peer_addr().unwrap()));
         tokio::spawn(Self::send_tcp(tcp_message_receiver, self.tcp_writer));
+
         while let Some(msg) = self.outgoing_messages.recv().await {
             match msg {
                 ServerMessage::Tcp(tcp_msg) => {tcp_message_sender.send(tcp_msg).unwrap();}

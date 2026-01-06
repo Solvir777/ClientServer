@@ -4,14 +4,13 @@ use crate::server::Server;
 mod server;
 mod server_network_manager;
 mod message_resolver;
+mod game_state;
 
 #[tokio::main]
 async fn main() {
     let server = Server::new(SERVER_ADDR).await;
 
-    tokio::task::spawn_blocking(
-        || server.run()
-    );
+    server.run::<50>();
 }
 
 

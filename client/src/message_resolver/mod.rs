@@ -22,6 +22,9 @@ impl Client {
 
     fn handle_udp_message(&mut self, message: ServerUdpMessage) {
         match message {
+            ServerUdpMessage::GameState(state) => {
+                self.client_state.update_with_state(state);
+            }
             _ => unimplemented!(),
         }
     }
